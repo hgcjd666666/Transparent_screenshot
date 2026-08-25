@@ -253,14 +253,30 @@ public class MainXposedModule extends XposedModule {
     public void onHotReloaded(@NonNull XposedModuleInterface.HotReloadedParam param) {
         log(Log.INFO, TAG, "onHotReloaded: " + param.getProcessName()
                 + ", " + param.getOldHookHandles().size() + " old hooks");
+        // 从旧代 hook 的 executable 反推宿主 classloader(宿主 loader 热重载后不变)，
+        // 必须在 unhook 之前读取(getExecutable 在 unhook 后可能失效)。
+        ClassLoader cl = null;
+        for (XposedInterface.HookHandle h : param.getOldHookHandles()) {
+            try {
+                java.lang.reflect.Executable ex = h.getExecutable();
+                if (ex != null) {
+                    cl = ex.getDeclaringClass().getClassLoader();
+                    break;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
         // 卸载旧代次安装的所有 hook
         param.getOldHookHandles().forEach(XposedInterface.HookHandle::unhook);
 
         // 重置静态安装标志与运行时缓存，允许按需重新安装
         resetForHotReload();
 
-        // 模块 classloader 的 parent 链就是宿主 classloader，通过它可加载系统/oplus 类
-        ClassLoader cl = getClass().getClassLoader();
+        if (cl == null) {
+            log(Log.WARN, TAG, "No host classloader derivable from old hooks, hooks cannot be reinstalled");
+            return;
+        }
         if (param.isSystemServer()) {
             initSystemServerHooks(cl);
         } else if ("com.android.systemui".equals(param.getProcessName())) {
