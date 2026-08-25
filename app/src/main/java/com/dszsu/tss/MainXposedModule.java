@@ -54,6 +54,8 @@ public class MainXposedModule extends XposedModule {
     private static volatile boolean sSystemUIHookInstalled = false;
     private volatile Set<String> systemRenderPackages = Collections.emptySet();
     private static volatile String sProcessName;
+    // 宿主(system_server/app)的 classloader，热重载时不会变，通过 savedInstanceState 传给新代次
+    private static volatile ClassLoader sHostClassLoader;
     private final Object systemUILock = new Object();
     private final Set<String> enabledFeatures = new HashSet<>();
     private static volatile Method sTxnSetSkipScreenshot;
@@ -168,6 +170,7 @@ public class MainXposedModule extends XposedModule {
     public void onSystemServerStarting(
             @NonNull XposedModuleInterface.SystemServerStartingParam param) {
         super.onSystemServerStarting(param);
+        sHostClassLoader = param.getClassLoader();
         initSystemServerHooks(param.getClassLoader());
     }
 
@@ -185,6 +188,7 @@ public class MainXposedModule extends XposedModule {
 
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
+        sHostClassLoader = param.getClassLoader();
         if ("com.android.systemui".equals(param.getPackageName())) {
             initSystemUIHooks(param.getClassLoader());
             return;
@@ -246,6 +250,8 @@ public class MainXposedModule extends XposedModule {
     @Override
     public boolean onHotReloading(@NonNull XposedModuleInterface.HotReloadingParam param) {
         log(Log.INFO, TAG, "onHotReloading: " + getProcessName());
+        // 宿主 classloader 热重载时不会变，传给新代次用于重装 hook
+        param.setSavedInstanceState(sHostClassLoader);
         return true; // 同意热重载
     }
 
@@ -259,9 +265,13 @@ public class MainXposedModule extends XposedModule {
         // 重置静态安装标志与运行时缓存，允许按需重新安装
         resetForHotReload();
 
-        // 必须用 HotReloadedParam 提供的进程默认 classloader；
-        // 线程 context classloader 在热重载时不是 system_server/app 的 classloader，无法加载系统/oplus 类
-        ClassLoader cl = param.getDefaultClassLoader();
+        // 从上一代传回的宿主 classloader 中重装 hook(宿主 classloader 不会被框架换掉)
+        Object saved = param.getSavedInstanceState();
+        ClassLoader cl = (saved instanceof ClassLoader) ? (ClassLoader) saved : sHostClassLoader;
+        if (cl == null) {
+            log(Log.ERROR, TAG, "No host classloader after hot reload, hooks cannot be reinstalled");
+            return;
+        }
         if (param.isSystemServer()) {
             initSystemServerHooks(cl);
         } else if ("com.android.systemui".equals(param.getProcessName())) {
