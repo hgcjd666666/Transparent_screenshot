@@ -449,7 +449,8 @@ public class MainXposedModule extends XposedModule {
         try {
             windowStateIsFullscreenMethod = findMethodInHierarchy(windowStateClass, "isFullscreen");
             windowStateIsFullscreenMethod.setAccessible(true);
-        } catch (Throwable ignored) {
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "isFullscreen reflection failed: " + t);
             windowStateIsFullscreenMethod = null;
         }
 
