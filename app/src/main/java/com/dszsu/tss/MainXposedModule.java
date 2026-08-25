@@ -544,7 +544,7 @@ public class MainXposedModule extends XposedModule {
                     Object result = chain.proceed();
                     try {
                         Object winState = chain.getThisObject();
-                        Object transaction = chain.getArgs()[0];
+                        Object transaction = chain.getArgs().get(0);
                         boolean isNeedHide = shouldHideZoom(winState);
                         if (transaction == null) return result;
                         Object sc = windowStateScField != null ? windowStateScField.get(winState) : null;
