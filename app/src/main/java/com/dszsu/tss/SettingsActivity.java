@@ -1,5 +1,6 @@
 package com.dszsu.tss;
 
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.view.MenuItem;
@@ -15,7 +16,6 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.SwitchCompat;
 
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 
 import io.github.libxposed.service.XposedService;
@@ -24,15 +24,13 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
 
     private XposedService service;
     private Spinner spinnerBrand;
-    private SwitchCompat switchSystemHide;
+    private SwitchCompat switchHideZoom;
     private SwitchCompat switchSystemUIEnhancement;
-    private SwitchCompat switchRenderAppOverlay;
-    private SwitchCompat switchRenderFocused;
-    private SwitchCompat switchRenderInput;
     private TextView textSystemHideInfo;
     private TextView textSystemUIInfo;
     private TextView textSystemHideLabel;
     private TextView textSystemUILabel;
+    private View rowShowZoomPackages;
     private boolean loading = false;
 
     private static final String[] BRAND_VALUES = {
@@ -51,15 +49,13 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
         setContentView(R.layout.activity_settings);
 
         spinnerBrand = findViewById(R.id.spinner_brand);
-        switchSystemHide = findViewById(R.id.switch_system_hide_master);
+        switchHideZoom = findViewById(R.id.switch_hide_zoom);
         switchSystemUIEnhancement = findViewById(R.id.switch_system_ui_enhancement);
         textSystemHideInfo = findViewById(R.id.text_system_hide_info);
         textSystemUIInfo = findViewById(R.id.text_system_ui_info);
         textSystemHideLabel = findViewById(R.id.text_system_hide_label);
         textSystemUILabel = findViewById(R.id.text_system_ui_label);
-        switchRenderAppOverlay = findViewById(R.id.switch_render_app_overlay);
-        switchRenderFocused = findViewById(R.id.switch_render_focused);
-        switchRenderInput = findViewById(R.id.switch_render_input);
+        rowShowZoomPackages = findViewById(R.id.row_show_zoom_packages);
 
         String[] brandLabels = getResources().getStringArray(R.array.brand_labels);
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
@@ -101,13 +97,13 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
         spinnerBrand.setSelection(pos, false);
 
         SharedPreferences sysPrefs = service.getRemotePreferences("system_hide");
-        boolean hasPackages = sysPrefs.contains("packages");
+        boolean zoomHideEnabled = sysPrefs.getBoolean("hide_zoom_enabled", false);
         boolean inSystemScope = service.getScope().contains("system");
-        switchSystemHide.setChecked(hasPackages);
+        switchHideZoom.setChecked(zoomHideEnabled);
 
-        textSystemHideInfo.setText(R.string.system_hide_warning);
-        String hideLabel = getString(R.string.system_hide_master);
-        if (hasPackages && !inSystemScope) {
+        textSystemHideInfo.setText(R.string.hide_zoom_desc);
+        String hideLabel = getString(R.string.hide_zoom_title);
+        if (zoomHideEnabled && !inSystemScope) {
             hideLabel += " " + getString(R.string.not_in_scope_suffix).trim();
         }
         textSystemHideLabel.setText(hideLabel);
@@ -122,10 +118,6 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
             uiLabel += " " + getString(R.string.not_in_scope_suffix).trim();
         }
         textSystemUILabel.setText(uiLabel);
-
-        switchRenderAppOverlay.setChecked(sysPrefs.getBoolean("render_app_overlay", true));
-        switchRenderFocused.setChecked(sysPrefs.getBoolean("render_focused", false));
-        switchRenderInput.setChecked(sysPrefs.getBoolean("render_input", true));
 
         loading = false;
     }
@@ -143,17 +135,15 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
             }
         });
 
-        switchSystemHide.setOnCheckedChangeListener((v, checked) -> {
+        switchHideZoom.setOnCheckedChangeListener((v, checked) -> {
             if (loading) return;
             if (service == null) {
-                switchSystemHide.setChecked(!checked);
+                switchHideZoom.setChecked(!checked);
                 return;
             }
             if (checked) {
-                SharedPreferences prefs = service.getRemotePreferences("system_hide");
-                if (!prefs.contains("packages")) {
-                    prefs.edit().putStringSet("packages", new HashSet<>()).apply();
-                }
+                service.getRemotePreferences("system_hide").edit()
+                        .putBoolean("hide_zoom_enabled", true).apply();
                 boolean alreadyInScope = service.getScope().contains("system");
                 if (!alreadyInScope) {
                     service.requestScope(Collections.singletonList("system"),
@@ -163,7 +153,7 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
                                     runOnUiThread(() -> {
                                         loadConfig();
                                         Toast.makeText(SettingsActivity.this,
-                                                R.string.system_hide_enabled, Toast.LENGTH_LONG).show();
+                                                R.string.hide_zoom_enabled, Toast.LENGTH_LONG).show();
                                     });
                                 }
 
@@ -178,12 +168,12 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
                             });
                 } else {
                     Toast.makeText(SettingsActivity.this,
-                            R.string.system_hide_enabled, Toast.LENGTH_LONG).show();
+                            R.string.hide_zoom_enabled, Toast.LENGTH_LONG).show();
                 }
             } else {
                 service.removeScope(Collections.singletonList("system"));
-                service.getRemotePreferences("system_hide").edit().remove("packages").apply();
-                Toast.makeText(SettingsActivity.this, R.string.system_hide_disabled, Toast.LENGTH_LONG).show();
+                service.getRemotePreferences("system_hide").edit().remove("hide_zoom_enabled").apply();
+                Toast.makeText(SettingsActivity.this, R.string.hide_zoom_disabled, Toast.LENGTH_LONG).show();
             }
         });
 
@@ -232,23 +222,8 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
             }
         });
 
-        switchRenderAppOverlay.setOnCheckedChangeListener((v, checked) -> {
-            if (loading || service == null) return;
-            service.getRemotePreferences("system_hide").edit()
-                    .putBoolean("render_app_overlay", checked).apply();
-        });
-
-        switchRenderFocused.setOnCheckedChangeListener((v, checked) -> {
-            if (loading || service == null) return;
-            service.getRemotePreferences("system_hide").edit()
-                    .putBoolean("render_focused", checked).apply();
-        });
-
-        switchRenderInput.setOnCheckedChangeListener((v, checked) -> {
-            if (loading || service == null) return;
-            service.getRemotePreferences("system_hide").edit()
-                    .putBoolean("render_input", checked).apply();
-        });
+        rowShowZoomPackages.setOnClickListener(v ->
+                startActivity(new Intent(SettingsActivity.this, SystemHideActivity.class)));
     }
 
     private void saveGlobalTitle(String title) {

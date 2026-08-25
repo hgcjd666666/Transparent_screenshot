@@ -126,7 +126,7 @@ public class MainActivity extends AppCompatActivity implements App.ServiceListen
         }
         try {
             SharedPreferences sysPrefs = service.getRemotePreferences("system_hide");
-            systemHideEnabled = sysPrefs.contains("packages");
+            systemHideEnabled = sysPrefs.getBoolean("hide_zoom_enabled", false);
         } catch (Throwable t) {
             systemHideEnabled = false;
         }

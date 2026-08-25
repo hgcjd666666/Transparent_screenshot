@@ -43,7 +43,7 @@
         <activity
             android:name=".SystemHideActivity"
             android:exported="false"
-            android:label="白名单渲染"
+            android:label="@string/show_zoom_packages_title"
             android:parentActivityName=".MainActivity" />
 
     </application>

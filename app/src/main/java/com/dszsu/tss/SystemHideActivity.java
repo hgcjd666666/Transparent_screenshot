@@ -39,7 +39,7 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
     private static final Set<String> EXCLUDE_PACKAGES = Set.of(
             "system", "android", "com.android.systemui", "oplus");
 
-    private final Set<String> renderPackages = new HashSet<>();
+    private final Set<String> showZoomPackages = new HashSet<>();
     private final List<AppInfo> allFilteredApps = new ArrayList<>();
 
     private ActivitySystemHideBinding binding;
@@ -131,7 +131,7 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
     public void onServiceChanged(XposedService svc) {
         service = svc;
         if (svc != null) {
-            loadRenderPackages();
+            loadShowZoomPackages();
             rebuildAppList();
         }
     }
@@ -153,14 +153,14 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
         return query == null ? "" : query.toLowerCase(Locale.ROOT).trim();
     }
 
-    private void loadRenderPackages() {
+    private void loadShowZoomPackages() {
         if (service == null) return;
         SharedPreferences prefs = service.getRemotePreferences("system_hide");
-        renderPackages.clear();
-        Set<String> raw = prefs.getStringSet("packages", new HashSet<>());
+        showZoomPackages.clear();
+        Set<String> raw = prefs.getStringSet("show_zoom_packages", new HashSet<>());
         for (String p : raw) {
             if (p != null && !p.isEmpty()) {
-                renderPackages.add(normalizePackageName(p));
+                showZoomPackages.add(normalizePackageName(p));
             }
         }
     }
@@ -171,7 +171,7 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
 
         for (AppInfo app : allApps) {
             String lowerPkg = normalizePackageName(app.getPackageName());
-            boolean enabled = renderPackages.contains(lowerPkg);
+            boolean enabled = showZoomPackages.contains(lowerPkg);
 
             if (!enabled) {
                 if (EXCLUDE_PACKAGES.contains(lowerPkg) || isSubPackageOfExcluded(lowerPkg))
@@ -211,7 +211,7 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
                     && !normalizePackageName(app.getPackageName()).contains(lowerQuery)) {
                 continue;
             }
-            if (renderPackages.contains(normalizePackageName(app.getPackageName()))) {
+            if (showZoomPackages.contains(normalizePackageName(app.getPackageName()))) {
                 enabled.add(app);
             } else {
                 disabled.add(app);
@@ -224,19 +224,19 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
         List<AppInfo> finalList = new ArrayList<>(enabled.size() + disabled.size());
         finalList.addAll(enabled);
         finalList.addAll(disabled);
-        adapter.submitList(finalList, renderPackages);
+        adapter.submitList(finalList, showZoomPackages);
     }
 
     private void onToggle(String packageName, boolean enabled) {
         if (service == null) return;
         String lowerPkg = normalizePackageName(packageName);
         if (enabled) {
-            renderPackages.add(lowerPkg);
+            showZoomPackages.add(lowerPkg);
         } else {
-            renderPackages.remove(lowerPkg);
+            showZoomPackages.remove(lowerPkg);
         }
         service.getRemotePreferences("system_hide").edit()
-                .putStringSet("packages", new HashSet<>(renderPackages))
+                .putStringSet("show_zoom_packages", new HashSet<>(showZoomPackages))
                 .apply();
         applyFilter(currentQuery);
     }

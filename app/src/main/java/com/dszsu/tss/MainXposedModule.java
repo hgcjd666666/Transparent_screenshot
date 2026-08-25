@@ -38,6 +38,9 @@ public class MainXposedModule extends XposedModule {
     private static final int FLAG_NOT_TOUCHABLE = 0x00000010;
     private static final int FLAG_NOT_TOUCH_MODAL = 0x00000020;
 
+    /** Oplus 小窗（缩放窗）的窗口模式值 WINDOWING_MODE_ZOOM。 */
+    private static final int WINDOWING_MODE_ZOOM = 100;
+
     private static volatile boolean sAppHooksInstalled = false;
     private static volatile boolean sSystemHooksInstalled = false;
     private final Object appLock = new Object();
@@ -46,13 +49,7 @@ public class MainXposedModule extends XposedModule {
     private static volatile Class<?> sScClass;
     private static volatile Method sScIsValid;
     private static volatile Constructor<?> sTxnConstructor;
-
-    private volatile boolean systemRenderEnabled = false;
-    private volatile boolean renderFocusedEnabled = false;
-    private volatile boolean renderInputEnabled = true;
-    private volatile boolean renderAppOverlayEnabled = true;
     private static volatile boolean sSystemUIHookInstalled = false;
-    private volatile Set<String> systemRenderPackages = Collections.emptySet();
     private static volatile String sProcessName;
     private final Object systemUILock = new Object();
     private final Set<String> enabledFeatures = new HashSet<>();
@@ -62,27 +59,26 @@ public class MainXposedModule extends XposedModule {
     private static volatile Method sTxnApply;
     private static volatile Method sTxnClose;
     private final Object systemLock = new Object();
-    private final Map<Object, Boolean> windowHideCache = Collections.synchronizedMap(new WeakHashMap<>());
     private final Map<String, SharedPreferences.OnSharedPreferenceChangeListener> appPrefsListeners
             = new ConcurrentHashMap<>();
     private final Set<Object> systemSecureApplied = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
     private final Set<Object> taskSecureApplied = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
-    private final Set<Object> processedWindows = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
     private final Set<Object> secureApplied = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
     private final Set<Object> flexibleTaskVri = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
     private final ThreadLocal<Boolean> sFlexibleMenuShowing = new ThreadLocal<>();
     private volatile boolean systemUIEnhancementEnabled = false;
     private volatile String windowTitle = null;
     private int systemTxnMethodType = 0;
-    private volatile int cacheVersion = 0;
+
+    // ==================== 隐藏小窗（Oplus 缩放窗）配置 ====================
+    private volatile boolean hideZoomEnabled = false;
+    private volatile Set<String> showZoomPackages = Collections.emptySet();
+
     private final SharedPreferences.OnSharedPreferenceChangeListener systemPrefsListener =
             (prefs, key) -> {
-                if ("packages".equals(key) || "render_focused".equals(key)
-                        || "render_input".equals(key) || "render_app_overlay".equals(key)) {
-                    loadSystemRenderPackages(prefs);
-                    //noinspection NonAtomicOperationOnVolatileField
-                    cacheVersion++;
-                    log(Log.INFO, TAG, "System render config updated: " + key);
+                if ("hide_zoom_enabled".equals(key) || "show_zoom_packages".equals(key)) {
+                    loadSystemHideConfig(prefs);
+                    log(Log.INFO, TAG, "System hide config updated: " + key);
                 } else if ("system_ui_enhancement_enabled".equals(key)) {
                     systemUIEnhancementEnabled = prefs.contains("system_ui_enhancement_enabled");
                     log(Log.INFO, TAG, "SystemUI enhancement toggled: " + systemUIEnhancementEnabled);
@@ -90,31 +86,21 @@ public class MainXposedModule extends XposedModule {
             };
 
     private Class<?> windowStateClass;
-    private int localCacheVersion = -1;
     private Class<?> windowStateAnimatorClass;
     private Class<?> windowSurfaceControllerClass;
     private Class<?> transactionClass;
     private Class<?> surfaceControlClass;
     @Nullable
     private Class<?> taskClass;
-    @Nullable
-    private Field windowStateAttrsField;
-
     private Method getOwningPackageMethod;
     @Nullable
-    private Field layoutParamsPackageNameField;
-    @Nullable
-    private Field layoutParamsTypeField;
-    @Nullable
-    private Field layoutParamsFlagsField;
-    @Nullable
-    private Method windowStateIsFocusedMethod;
-    @Nullable
-    private Method windowStateIsFullscreenMethod;
+    private Method getWindowTagMethod;
     @Nullable
     private Method getTaskMethod;
     @Nullable
     private Method taskGetSurfaceControlMethod;
+    @Nullable
+    private Method taskGetWindowingModeMethod;
     private Field animatorWinField;
     @Nullable
     private Field animatorSurfaceControllerField;
@@ -129,6 +115,21 @@ public class MainXposedModule extends XposedModule {
     private Method systemTxnSetSecure;
     private Method systemTxnApply;
     private Method systemTxnClose;
+
+    // ==================== Oplus 小窗状态（system_server 反射） ====================
+    @Nullable
+    private Class<?> zoomWindowManagerClass;
+    @Nullable
+    private Method zoomWindowGetInstanceMethod;
+    @Nullable
+    private Method zoomWindowGetCurrentStateMethod;
+    @Nullable
+    private Class<?> zoomWindowInfoClass;
+    @Nullable
+    private Field zoomWindowInfoWindowShownField;
+    @Nullable
+    private Field zoomWindowInfoZoomPkgField;
+    private volatile Object zoomWindowManagerInstance;
 
     private static Method findMethodInHierarchy(Class<?> cls, String name, Class<?>... paramTypes)
             throws NoSuchMethodException {
@@ -174,7 +175,7 @@ public class MainXposedModule extends XposedModule {
     private void initSystemServerHooks(ClassLoader cl) {
         try {
             SharedPreferences sysPrefs = getRemotePreferences(SYSTEM_HIDE_GROUP);
-            loadSystemRenderPackages(sysPrefs);
+            loadSystemHideConfig(sysPrefs);
             systemUIEnhancementEnabled = sysPrefs.contains("system_ui_enhancement_enabled");
             sysPrefs.registerOnSharedPreferenceChangeListener(systemPrefsListener);
             installSystemHooks(cl);
@@ -296,13 +297,11 @@ public class MainXposedModule extends XposedModule {
         sScClass = null;
         sScIsValid = null;
         sTxnConstructor = null;
-        localCacheVersion = -1;
-        windowHideCache.clear();
         systemSecureApplied.clear();
         taskSecureApplied.clear();
-        processedWindows.clear();
         secureApplied.clear();
         flexibleTaskVri.clear();
+        zoomWindowManagerInstance = null;
         appPrefsListeners.clear();
         synchronized (enabledFeatures) {
             enabledFeatures.clear();
@@ -380,6 +379,7 @@ public class MainXposedModule extends XposedModule {
                 || enabledFeatures.contains("nofocus_only");
     }
 
+    // ==================== 系统 hook：隐藏 Oplus 小窗 ====================
     @SuppressLint("PrivateApi")
     private void installSystemHooks(ClassLoader cl) throws Exception {
         if (sSystemHooksInstalled) return;
@@ -388,14 +388,16 @@ public class MainXposedModule extends XposedModule {
 
             initSystemReflection(cl);
 
-            installCreateSurfaceHook();
+            // 主判定：每次 updateSurfacePosition 用传入的 transaction 动态设/取消 skipScreenshot，
+            // 可随配置变化实时恢复（参考 Oplus16_HideZoomWindow）。
+            if (transactionClass != null
+                    && methodExists(windowStateClass, "updateSurfacePosition", transactionClass)) {
+                installZoomHideHook();
+            } else {
+                log(Log.WARN, TAG, "updateSurfacePosition not found, fallback to performShowLocked only");
+            }
             if (methodExists(windowStateAnimatorClass, "performShowLocked")) {
                 installShowFallbackHook();
-            }
-            if (windowStateScField != null
-                    && methodExists(windowStateClass,
-                    "prepareWindowToDisplayDuringRelayout", boolean.class)) {
-                installHighVersionHook();
             }
             installDestroySurfaceHook();
 
@@ -425,11 +427,14 @@ public class MainXposedModule extends XposedModule {
             getTaskMethod.setAccessible(true);
             taskGetSurfaceControlMethod = findMethodInHierarchy(taskClass, "getSurfaceControl");
             taskGetSurfaceControlMethod.setAccessible(true);
+            taskGetWindowingModeMethod = findMethodInHierarchy(taskClass, "getWindowingMode");
+            taskGetWindowingModeMethod.setAccessible(true);
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Task reflection failed: " + t.getMessage());
             taskClass = null;
             getTaskMethod = null;
             taskGetSurfaceControlMethod = null;
+            taskGetWindowingModeMethod = null;
         }
 
         try {
@@ -440,20 +445,11 @@ public class MainXposedModule extends XposedModule {
         }
 
         try {
-            windowStateIsFocusedMethod = findMethodInHierarchy(windowStateClass, "isFocused");
-            windowStateIsFocusedMethod.setAccessible(true);
+            getWindowTagMethod = findMethodInHierarchy(windowStateClass, "getWindowTag");
+            getWindowTagMethod.setAccessible(true);
         } catch (Throwable ignored) {
-            windowStateIsFocusedMethod = null;
+            getWindowTagMethod = null;
         }
-
-        try {
-            windowStateIsFullscreenMethod = findMethodInHierarchy(windowStateClass, "isFullscreen");
-            windowStateIsFullscreenMethod.setAccessible(true);
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "isFullscreen reflection failed: " + t);
-            windowStateIsFullscreenMethod = null;
-        }
-
 
         animatorWinField = findFieldInHierarchy(windowStateAnimatorClass, "mWin");
         animatorWinField.setAccessible(true);
@@ -480,26 +476,11 @@ public class MainXposedModule extends XposedModule {
             surfaceControllerSurfaceField = null;
         }
 
-
         try {
             windowStateScField = findFieldInHierarchy(windowStateClass, "mSurfaceControl");
             windowStateScField.setAccessible(true);
         } catch (Throwable ignored) {
             windowStateScField = null;
-        }
-
-        try {
-            windowStateAttrsField = findFieldInHierarchy(windowStateClass, "mAttrs");
-            windowStateAttrsField.setAccessible(true);
-            layoutParamsPackageNameField = WindowManager.LayoutParams.class.getField("packageName");
-            layoutParamsTypeField = WindowManager.LayoutParams.class.getField("type");
-            layoutParamsFlagsField = WindowManager.LayoutParams.class.getField("flags");
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "Direct field access for package name unavailable: " + t.getMessage());
-            windowStateAttrsField = null;
-            layoutParamsPackageNameField = null;
-            layoutParamsTypeField = null;
-            layoutParamsFlagsField = null;
         }
 
         systemTxnConstructor = transactionClass.getDeclaredConstructor();
@@ -528,20 +509,81 @@ public class MainXposedModule extends XposedModule {
         if (systemTxnMethodType == 0) {
             log(Log.WARN, TAG, "Neither setSkipScreenshot nor setSecure found");
         }
+
+        // Oplus 小窗状态（system_server 公开类）
+        try {
+            zoomWindowManagerClass = Class.forName("com.oplus.zoomwindow.OplusZoomWindowManager", false, cl);
+            zoomWindowGetInstanceMethod = zoomWindowManagerClass.getDeclaredMethod("getInstance");
+            zoomWindowGetInstanceMethod.setAccessible(true);
+            zoomWindowGetCurrentStateMethod = zoomWindowManagerClass.getDeclaredMethod("getCurrentZoomWindowState");
+            zoomWindowGetCurrentStateMethod.setAccessible(true);
+            zoomWindowInfoClass = Class.forName("com.oplus.zoomwindow.OplusZoomWindowInfo", false, cl);
+            zoomWindowInfoWindowShownField = findFieldInHierarchy(zoomWindowInfoClass, "windowShown");
+            zoomWindowInfoWindowShownField.setAccessible(true);
+            zoomWindowInfoZoomPkgField = findFieldInHierarchy(zoomWindowInfoClass, "zoomPkg");
+            zoomWindowInfoZoomPkgField.setAccessible(true);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "OplusZoomWindow reflection failed: " + t.getMessage());
+            zoomWindowManagerClass = null;
+            zoomWindowGetInstanceMethod = null;
+            zoomWindowGetCurrentStateMethod = null;
+            zoomWindowInfoClass = null;
+            zoomWindowInfoWindowShownField = null;
+            zoomWindowInfoZoomPkgField = null;
+            zoomWindowManagerInstance = null;
+        }
     }
 
-    private void installCreateSurfaceHook() throws Exception {
-        Method m = findMethodInHierarchy(windowStateAnimatorClass, "createSurfaceLocked");
+    /** 主钩子：WindowState.updateSurfacePosition 每次调用后，动态设置/取消小窗 surface 的 skipScreenshot。 */
+    private void installZoomHideHook() throws Exception {
+        Method m = findMethodInHierarchy(windowStateClass, "updateSurfacePosition", transactionClass);
         hook(m)
                 .setPriority(XposedInterface.PRIORITY_DEFAULT)
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(chain -> {
-                    // createSurfaceLocked 时机过早(窗口尚未布局/聚焦)，在此做隐藏判定会误伤
-                    // 全屏/前台窗口且被 processedWindows 永久缓存。隐藏判定改在窗口显示/relayout 时进行。
-                    return chain.proceed();
+                    Object result = chain.proceed();
+                    try {
+                        Object winState = chain.getThisObject();
+                        Object transaction = chain.getArgs()[0];
+                        boolean isNeedHide = shouldHideZoom(winState);
+                        if (transaction == null) return result;
+                        Object sc = windowStateScField != null ? windowStateScField.get(winState) : null;
+                        if (sc != null) setSkipScreenshotInTxn(transaction, sc, isNeedHide, systemSecureApplied);
+                        if (getTaskMethod != null && taskGetSurfaceControlMethod != null) {
+                            Object task = getTaskMethod.invoke(winState);
+                            if (task != null) {
+                                Object taskSc = taskGetSurfaceControlMethod.invoke(task);
+                                if (taskSc != null) {
+                                    setSkipScreenshotInTxn(transaction, taskSc, isNeedHide, taskSecureApplied);
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    return result;
                 });
     }
 
+    /**
+     * 在给定 transaction 上按 hide 设置/取消 skipScreenshot，并用 appliedSet 跟踪每个 surface 的当前状态：
+     * 已设为 true 的不重复设置；需取消时仅对已设置过的 surface 调 setSkipScreenshot(false)，实现动态恢复。
+     */
+    private void setSkipScreenshotInTxn(Object txn, Object sc, boolean hide, Set<Object> appliedSet) {
+        if (systemTxnSetSkipScreenshot == null) return;
+        if (hide) {
+            if (!appliedSet.add(sc)) return;
+        } else {
+            if (!appliedSet.remove(sc)) return;
+        }
+        try {
+            systemTxnSetSkipScreenshot.invoke(txn, sc, hide);
+        } catch (Throwable t) {
+            if (hide) appliedSet.remove(sc);
+            else appliedSet.add(sc);
+        }
+    }
+
+    /** 后备钩子：主钩子缺失（无 updateSurfacePosition）时，在小窗 performShowLocked 后设一次 skipScreenshot(true)。 */
     private void installShowFallbackHook() throws Exception {
         Method m = findMethodInHierarchy(windowStateAnimatorClass, "performShowLocked");
         hook(m)
@@ -549,36 +591,9 @@ public class MainXposedModule extends XposedModule {
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(chain -> {
                     Object result = chain.proceed();
-                    applySkipScreenshotIfNeeded(chain.getThisObject());
+                    applySkipScreenshotIfZoom(chain.getThisObject());
                     return result;
                 });
-    }
-
-    private void installHighVersionHook() {
-        try {
-            Method m = findMethodInHierarchy(windowStateClass,
-                    "prepareWindowToDisplayDuringRelayout", boolean.class);
-            hook(m)
-                    .setPriority(XposedInterface.PRIORITY_DEFAULT)
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(chain -> {
-                        Object result = chain.proceed();
-                        Object winState = chain.getThisObject();
-                        if (shouldHideWindow(winState)) {
-                            try {
-                                Object sc = null;
-                                if (windowStateScField != null) {
-                                    sc = windowStateScField.get(winState);
-                                }
-                                if (sc != null) applySkipScreenshot(sc);
-                            } catch (Throwable ignored) {
-                            }
-                            applySkipScreenshotToTask(winState);
-                        }
-                        return result;
-                    });
-        } catch (NoSuchMethodException ignored) {
-        }
     }
 
     private void installDestroySurfaceHook() {
@@ -588,74 +603,161 @@ public class MainXposedModule extends XposedModule {
                     .setPriority(XposedInterface.PRIORITY_DEFAULT)
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(chain -> {
-                        Object animator = chain.getThisObject();
                         Object sc = null;
-                        Object winState = null;
                         try {
+                            Object animator = chain.getThisObject();
                             if (animatorSurfaceControllerField != null) {
                                 Object ctrl = animatorSurfaceControllerField.get(animator);
                                 if (ctrl != null && surfaceControllerSurfaceField != null) {
                                     sc = surfaceControllerSurfaceField.get(ctrl);
                                 }
                             }
-                            winState = animatorWinField.get(animator);
                         } catch (Throwable ignored) {
                         }
 
                         Object result = chain.proceed();
 
                         if (sc != null) systemSecureApplied.remove(sc);
-                        if (winState != null) windowHideCache.remove(winState);
                         return result;
                     });
         } catch (Throwable ignored) {
         }
     }
 
-    private void loadSystemRenderPackages(SharedPreferences prefs) {
-        renderFocusedEnabled = prefs.getBoolean("render_focused", false);
-        renderInputEnabled = prefs.getBoolean("render_input", true);
-        renderAppOverlayEnabled = prefs.getBoolean("render_app_overlay", true);
-        if (!prefs.contains("packages")) {
-            systemRenderEnabled = false;
-            systemRenderPackages = Collections.emptySet();
-            return;
-        }
-        Set<String> raw = prefs.getStringSet("packages", Collections.emptySet());
+    // ==================== 隐藏小窗配置与判定 ====================
+
+    private void loadSystemHideConfig(SharedPreferences prefs) {
+        hideZoomEnabled = prefs.getBoolean("hide_zoom_enabled", false);
+        Set<String> raw = prefs.getStringSet("show_zoom_packages", Collections.emptySet());
         Set<String> lower = new HashSet<>(raw.size() * 2);
         for (String p : raw) {
             if (p != null && !p.isEmpty()) lower.add(p.toLowerCase(Locale.ROOT));
         }
-        systemRenderPackages = Collections.unmodifiableSet(lower);
-        systemRenderEnabled = true;
+        showZoomPackages = Collections.unmodifiableSet(lower);
     }
 
-    private void applySkipScreenshotIfNeeded(Object animator) {
-        if (!systemRenderEnabled || animator == null) return;
-        try {
-            Object winState = animatorWinField.get(animator);
-            if (winState == null || !processedWindows.add(winState)) return;
-            if (!shouldHideWindow(winState)) return;
+    /**
+     * 是否隐藏该窗口：总开关开启 && 是小窗 && 小窗所属包（# 分隔）任一不在“要显示的小窗”集合中。
+     */
+    private boolean shouldHideZoom(Object winState) {
+        if (!hideZoomEnabled || winState == null) return false;
 
+        boolean isZoom = isZoomWindow(winState);
+        String zoomPkg = getZoomPkg();
+        boolean hide = isZoom && !isZoomPkgShown(zoomPkg);
+
+        if (isZoom || hide) {
+            debugLog(Log.INFO, TAG, "[ZOOM] tag=" + getWindowTag(winState)
+                    + " isZoom=" + isZoom
+                    + " zoomPkg=" + zoomPkg
+                    + " windowShown=" + isZoomWindowShown()
+                    + " hide=" + hide);
+        }
+        return hide;
+    }
+
+    /** 判断窗口是否处于 Oplus 小窗（缩放窗）模式：所在 Task 的 windowingMode == WINDOWING_MODE_ZOOM。 */
+    private boolean isZoomWindow(Object winState) {
+        if (winState == null || getTaskMethod == null || taskGetWindowingModeMethod == null) return false;
+        try {
+            Object task = getTaskMethod.invoke(winState);
+            if (task == null) return false;
+            Object mode = taskGetWindowingModeMethod.invoke(task);
+            return mode instanceof Integer && (Integer) mode == WINDOWING_MODE_ZOOM;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** 读取当前小窗所属包名（OplusZoomWindowInfo.zoomPkg），失败/不可用时返回 null。 */
+    private String getZoomPkg() {
+        if (zoomWindowGetCurrentStateMethod == null || zoomWindowInfoZoomPkgField == null) return null;
+        try {
+            Object mgr = getZoomWindowManager();
+            if (mgr == null) return null;
+            Object info = zoomWindowGetCurrentStateMethod.invoke(mgr);
+            if (info == null) return null;
+            return (String) zoomWindowInfoZoomPkgField.get(info);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** OplusZoomWindowInfo.windowShown：仅用于诊断日志，不参与判定。 */
+    private boolean isZoomWindowShown() {
+        if (zoomWindowGetCurrentStateMethod == null || zoomWindowInfoWindowShownField == null) return false;
+        try {
+            Object mgr = getZoomWindowManager();
+            if (mgr == null) return false;
+            Object info = zoomWindowGetCurrentStateMethod.invoke(mgr);
+            if (info == null) return false;
+            return Boolean.TRUE.equals(zoomWindowInfoWindowShownField.get(info));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private Object getZoomWindowManager() {
+        if (zoomWindowManagerClass == null) return null;
+        Object cached = zoomWindowManagerInstance;
+        if (cached != null) return cached;
+        if (zoomWindowGetInstanceMethod == null) return null;
+        try {
+            Object mgr = zoomWindowGetInstanceMethod.invoke(null);
+            if (mgr != null) zoomWindowManagerInstance = mgr;
+            return mgr;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** zoomPkg 可能以 "#" 分隔多个包：全部在“要显示的小窗”集合中才视为豁免（不隐藏）。 */
+    private boolean isZoomPkgShown(String zoomPkg) {
+        if (zoomPkg == null || zoomPkg.isEmpty()) return false;
+        for (String part : zoomPkg.split("#")) {
+            if (part.isEmpty()) return false;
+            if (!showZoomPackages.contains(part.toLowerCase(Locale.ROOT))) return false;
+        }
+        return true;
+    }
+
+    private String getWindowTag(Object winState) {
+        if (winState == null || getWindowTagMethod == null) return null;
+        try {
+            Object tag = getWindowTagMethod.invoke(winState);
+            return tag == null ? null : tag.toString();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** 后备：对小窗窗口 surface 与 task surface 各建一次 Transaction 设 skipScreenshot(true)。 */
+    private void applySkipScreenshotIfZoom(Object animator) {
+        if (animator == null) return;
+        Object winState = animatorWinFieldGet(animator);
+        if (winState == null || !shouldHideZoom(winState)) return;
+        try {
+            Object sc = null;
             if (animatorSurfaceControllerField != null) {
                 Object ctrl = animatorSurfaceControllerField.get(animator);
-                if (ctrl != null) {
-                    Object sc = null;
-                    if (surfaceControllerSurfaceField != null) {
-                        sc = surfaceControllerSurfaceField.get(ctrl);
-                    }
-                    if (sc == null && windowStateScField != null) {
-                        sc = windowStateScField.get(winState);
-                    }
-                    if (sc != null) applySkipScreenshot(sc);
+                if (ctrl != null && surfaceControllerSurfaceField != null) {
+                    sc = surfaceControllerSurfaceField.get(ctrl);
                 }
-            } else if (windowStateScField != null) {
-                Object sc = windowStateScField.get(winState);
-                if (sc != null) applySkipScreenshot(sc);
             }
-
+            if (sc == null && windowStateScField != null) {
+                sc = windowStateScField.get(winState);
+            }
+            if (sc != null) applySkipScreenshot(sc);
             applySkipScreenshotToTask(winState);
         } catch (Throwable ignored) {
+        }
+    }
+
+    private Object animatorWinFieldGet(Object animator) {
+        try {
+            return animatorWinField.get(animator);
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
@@ -717,117 +819,9 @@ public class MainXposedModule extends XposedModule {
         if (!success) systemSecureApplied.remove(sc);
     }
 
-    private boolean shouldHideWindow(Object winState) {
-        if (!systemRenderEnabled || winState == null) return false;
-
-        if (localCacheVersion != cacheVersion) {
-            windowHideCache.clear();
-            systemSecureApplied.clear();
-            taskSecureApplied.clear();
-            processedWindows.clear();
-            localCacheVersion = cacheVersion;
-        }
-
-        Boolean cached = windowHideCache.get(winState);
-        if (cached != null) return cached;
-
-        boolean hide = false;
-        String pkg = null;
-        int winType = -1;
-        int winFlags = 0;
-        boolean focused = false;
-        boolean fullscreen = false;
-        try {
-            if (windowStateAttrsField != null) {
-                try {
-                    Object attrs = windowStateAttrsField.get(winState);
-                    if (attrs != null) {
-                        if (layoutParamsPackageNameField != null) {
-                            pkg = (String) layoutParamsPackageNameField.get(attrs);
-                        }
-                        if (layoutParamsTypeField != null) {
-                            winType = layoutParamsTypeField.getInt(attrs);
-                        }
-                        if (layoutParamsFlagsField != null) {
-                            winFlags = layoutParamsFlagsField.getInt(attrs);
-                        }
-                    }
-                } catch (Throwable ignored) {
-                }
-            }
-
-            if (pkg == null && getOwningPackageMethod != null) {
-                pkg = (String) getOwningPackageMethod.invoke(winState);
-            }
-
-            focused = isForegroundApp(winState);
-            fullscreen = isFullscreenWindow(winState);
-
-            if (pkg != null && systemRenderPackages.contains(pkg.toLowerCase(Locale.ROOT))) {
-                // 1. 白名单选中的包 → 渲染
-                hide = false;
-            } else if (fullscreen) {
-                // 2. 全屏窗口 → 始终渲染(保底，防止背景黑)
-                hide = false;
-            } else if (winType == WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                    && renderAppOverlayEnabled) {
-                // 3. 应用悬浮窗 && 开关开启 → 渲染
-                hide = false;
-            } else if (winType == WindowManager.LayoutParams.TYPE_INPUT_METHOD
-                    && renderInputEnabled) {
-                // 4. 输入法 && 开关开启 → 渲染
-                hide = false;
-            } else if (focused && renderFocusedEnabled && !isAntiFocus(winFlags)) {
-                // 5. 聚焦窗口 && 开关开启 && 非防聚焦浮窗 → 渲染
-                hide = false;
-            } else {
-                // 6. 其余(导航栏/状态栏等) → 隐藏
-                hide = true;
-            }
-        } catch (Throwable ignored) {
-        }
-
-        windowHideCache.put(winState, hide);
-        if (systemRenderEnabled) {
-            debugLog(Log.INFO, TAG, "[WIN] pkg=" + pkg + " type=" + winType
-                    + " focused=" + focused
-                    + " fullscreen=" + fullscreen
-                    + " isFocusedM=" + (windowStateIsFocusedMethod != null)
-                    + " isFullscreenM=" + (windowStateIsFullscreenMethod != null)
-                    + " hide=" + hide);
-        }
-        return hide;
-    }
-
     /** 仅 debug 构建输出日志，release 构建静默以减少日志量。 */
     private void debugLog(int level, String tag, String msg) {
         if (BuildConfig.DEBUG) log(level, tag, msg);
-    }
-
-    /** 判断窗口是否为全屏窗口。 */
-    private boolean isFullscreenWindow(Object winState) {
-        if (winState == null || windowStateIsFullscreenMethod == null) return false;
-        try {
-            return Boolean.TRUE.equals(windowStateIsFullscreenMethod.invoke(winState));
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    /** 判断窗口是否带防聚焦(magic_flags)标志：NOT_FOCUSABLE|NOT_TOUCHABLE|NOT_TOUCH_MODAL。 */
-    private boolean isAntiFocus(int flags) {
-        int mask = FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCHABLE | FLAG_NOT_TOUCH_MODAL;
-        return (flags & mask) == mask;
-    }
-
-    /** 判断窗口是否为前台应用窗口（即系统当前聚焦窗口 mCurrentFocus）。 */
-    private boolean isForegroundApp(Object winState) {
-        if (winState == null || windowStateIsFocusedMethod == null) return false;
-        try {
-            return Boolean.TRUE.equals(windowStateIsFocusedMethod.invoke(winState));
-        } catch (Throwable ignored) {
-            return false;
-        }
     }
 
     @SuppressLint("PrivateApi")
