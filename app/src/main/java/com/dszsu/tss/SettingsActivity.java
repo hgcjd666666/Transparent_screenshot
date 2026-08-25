@@ -26,6 +26,9 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
     private Spinner spinnerBrand;
     private SwitchCompat switchSystemHide;
     private SwitchCompat switchSystemUIEnhancement;
+    private SwitchCompat switchRenderAppOverlay;
+    private SwitchCompat switchRenderFocused;
+    private SwitchCompat switchRenderInput;
     private TextView textSystemHideInfo;
     private TextView textSystemUIInfo;
     private TextView textSystemHideLabel;
@@ -54,6 +57,9 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
         textSystemUIInfo = findViewById(R.id.text_system_ui_info);
         textSystemHideLabel = findViewById(R.id.text_system_hide_label);
         textSystemUILabel = findViewById(R.id.text_system_ui_label);
+        switchRenderAppOverlay = findViewById(R.id.switch_render_app_overlay);
+        switchRenderFocused = findViewById(R.id.switch_render_focused);
+        switchRenderInput = findViewById(R.id.switch_render_input);
 
         String[] brandLabels = getResources().getStringArray(R.array.brand_labels);
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
@@ -116,6 +122,10 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
             uiLabel += " " + getString(R.string.not_in_scope_suffix).trim();
         }
         textSystemUILabel.setText(uiLabel);
+
+        switchRenderAppOverlay.setChecked(sysPrefs.getBoolean("render_app_overlay", true));
+        switchRenderFocused.setChecked(sysPrefs.getBoolean("render_focused", false));
+        switchRenderInput.setChecked(sysPrefs.getBoolean("render_input", true));
 
         loading = false;
     }
@@ -220,6 +230,24 @@ public class SettingsActivity extends AppCompatActivity implements App.ServiceLi
                 Toast.makeText(SettingsActivity.this,
                         R.string.system_ui_enhancement_disabled, Toast.LENGTH_LONG).show();
             }
+        });
+
+        switchRenderAppOverlay.setOnCheckedChangeListener((v, checked) -> {
+            if (loading || service == null) return;
+            service.getRemotePreferences("system_hide").edit()
+                    .putBoolean("render_app_overlay", checked).apply();
+        });
+
+        switchRenderFocused.setOnCheckedChangeListener((v, checked) -> {
+            if (loading || service == null) return;
+            service.getRemotePreferences("system_hide").edit()
+                    .putBoolean("render_focused", checked).apply();
+        });
+
+        switchRenderInput.setOnCheckedChangeListener((v, checked) -> {
+            if (loading || service == null) return;
+            service.getRemotePreferences("system_hide").edit()
+                    .putBoolean("render_input", checked).apply();
         });
     }
 

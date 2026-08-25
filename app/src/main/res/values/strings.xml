@@ -39,7 +39,13 @@
     <string name="must_remove_scope_suffix"> (Must Remove from Scope)</string>
     <string name="not_in_scope_suffix"> (Not in Scope)</string>
     <string name="framework_not_connected">Framework not connected, cannot refresh</string>
-    <string name="system_hide_warning">Only selected apps render in the screenshot; all other windows are skipped (input method is always kept). May cause lag. Enable only if necessary.</string>
+    <string name="system_hide_warning">Only selected apps render in the screenshot; all other windows are skipped. May cause lag. Enable only if necessary.</string>
+    <string name="render_focused_title">Render focused window</string>
+    <string name="render_focused_desc">Render the currently focused floating window even if not in the whitelist. Anti-focus floats are always hidden.</string>
+    <string name="render_input_title">Render input method</string>
+    <string name="render_input_desc">Render the IME window (default on).</string>
+    <string name="render_app_overlay_title">Render app floating windows</string>
+    <string name="render_app_overlay_desc">Show app floating windows (TYPE_APPLICATION_OVERLAY) normally (default on).</string>
     <string name="system_ui_enhancement">SystemUI menu hiding (Oplus)</string>
     <string name="system_ui_enhancement_label">(SystemUI)</string>
     <string name="system_ui_enhancement_warning">Oplus-specific enhancement: hides the floating window (小窗) menu. Only works on Oplus 15/16 devices.</string>

@@ -48,6 +48,9 @@ public class MainXposedModule extends XposedModule {
     private static volatile Constructor<?> sTxnConstructor;
 
     private volatile boolean systemRenderEnabled = false;
+    private volatile boolean renderFocusedEnabled = false;
+    private volatile boolean renderInputEnabled = true;
+    private volatile boolean renderAppOverlayEnabled = true;
     private static volatile boolean sSystemUIHookInstalled = false;
     private volatile Set<String> systemRenderPackages = Collections.emptySet();
     private static volatile String sProcessName;
@@ -74,11 +77,12 @@ public class MainXposedModule extends XposedModule {
     private volatile int cacheVersion = 0;
     private final SharedPreferences.OnSharedPreferenceChangeListener systemPrefsListener =
             (prefs, key) -> {
-                if ("packages".equals(key)) {
+                if ("packages".equals(key) || "render_focused".equals(key)
+                        || "render_input".equals(key) || "render_app_overlay".equals(key)) {
                     loadSystemRenderPackages(prefs);
                     //noinspection NonAtomicOperationOnVolatileField
                     cacheVersion++;
-                    log(Log.INFO, TAG, "System hide packages updated");
+                    log(Log.INFO, TAG, "System render config updated: " + key);
                 } else if ("system_ui_enhancement_enabled".equals(key)) {
                     systemUIEnhancementEnabled = prefs.contains("system_ui_enhancement_enabled");
                     log(Log.INFO, TAG, "SystemUI enhancement toggled: " + systemUIEnhancementEnabled);
@@ -102,7 +106,11 @@ public class MainXposedModule extends XposedModule {
     @Nullable
     private Field layoutParamsTypeField;
     @Nullable
+    private Field layoutParamsFlagsField;
+    @Nullable
     private Method windowStateIsFocusedMethod;
+    @Nullable
+    private Method windowStateIsFullscreenMethod;
     @Nullable
     private Method getTaskMethod;
     @Nullable
@@ -427,6 +435,13 @@ public class MainXposedModule extends XposedModule {
             windowStateIsFocusedMethod = null;
         }
 
+        try {
+            windowStateIsFullscreenMethod = findMethodInHierarchy(windowStateClass, "isFullscreen");
+            windowStateIsFullscreenMethod.setAccessible(true);
+        } catch (Throwable ignored) {
+            windowStateIsFullscreenMethod = null;
+        }
+
 
         animatorWinField = findFieldInHierarchy(windowStateAnimatorClass, "mWin");
         animatorWinField.setAccessible(true);
@@ -466,11 +481,13 @@ public class MainXposedModule extends XposedModule {
             windowStateAttrsField.setAccessible(true);
             layoutParamsPackageNameField = WindowManager.LayoutParams.class.getField("packageName");
             layoutParamsTypeField = WindowManager.LayoutParams.class.getField("type");
+            layoutParamsFlagsField = WindowManager.LayoutParams.class.getField("flags");
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Direct field access for package name unavailable: " + t.getMessage());
             windowStateAttrsField = null;
             layoutParamsPackageNameField = null;
             layoutParamsTypeField = null;
+            layoutParamsFlagsField = null;
         }
 
         systemTxnConstructor = transactionClass.getDeclaredConstructor();
@@ -507,9 +524,9 @@ public class MainXposedModule extends XposedModule {
                 .setPriority(XposedInterface.PRIORITY_DEFAULT)
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(chain -> {
-                    Object result = chain.proceed();
-                    applySkipScreenshotIfNeeded(chain.getThisObject());
-                    return result;
+                    // createSurfaceLocked 时机过早(窗口尚未布局/聚焦)，在此做隐藏判定会误伤
+                    // 全屏/前台窗口且被 processedWindows 永久缓存。隐藏判定改在窗口显示/relayout 时进行。
+                    return chain.proceed();
                 });
     }
 
@@ -584,6 +601,9 @@ public class MainXposedModule extends XposedModule {
     }
 
     private void loadSystemRenderPackages(SharedPreferences prefs) {
+        renderFocusedEnabled = prefs.getBoolean("render_focused", false);
+        renderInputEnabled = prefs.getBoolean("render_input", true);
+        renderAppOverlayEnabled = prefs.getBoolean("render_app_overlay", true);
         if (!prefs.contains("packages")) {
             systemRenderEnabled = false;
             systemRenderPackages = Collections.emptySet();
@@ -702,7 +722,9 @@ public class MainXposedModule extends XposedModule {
         boolean hide = false;
         String pkg = null;
         int winType = -1;
+        int winFlags = 0;
         boolean focused = false;
+        boolean fullscreen = false;
         try {
             if (windowStateAttrsField != null) {
                 try {
@@ -714,6 +736,9 @@ public class MainXposedModule extends XposedModule {
                         if (layoutParamsTypeField != null) {
                             winType = layoutParamsTypeField.getInt(attrs);
                         }
+                        if (layoutParamsFlagsField != null) {
+                            winFlags = layoutParamsFlagsField.getInt(attrs);
+                        }
                     }
                 } catch (Throwable ignored) {
                 }
@@ -724,15 +749,28 @@ public class MainXposedModule extends XposedModule {
             }
 
             focused = isForegroundApp(winState);
-            // 输入法窗口始终保留渲染，不受白名单影响
-            if (winType == WindowManager.LayoutParams.TYPE_INPUT_METHOD) {
+            fullscreen = isFullscreenWindow(winState);
+
+            if (pkg != null && systemRenderPackages.contains(pkg.toLowerCase(Locale.ROOT))) {
+                // 1. 白名单选中的包 → 渲染
                 hide = false;
-            } else if (focused) {
-                // 前台应用窗口（当前聚焦窗口）不隐藏，仅隐藏其余窗口
+            } else if (fullscreen) {
+                // 2. 全屏窗口 → 始终渲染(保底，防止背景黑)
+                hide = false;
+            } else if (winType == WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                    && renderAppOverlayEnabled) {
+                // 3. 应用悬浮窗 && 开关开启 → 渲染
+                hide = false;
+            } else if (winType == WindowManager.LayoutParams.TYPE_INPUT_METHOD
+                    && renderInputEnabled) {
+                // 4. 输入法 && 开关开启 → 渲染
+                hide = false;
+            } else if (focused && renderFocusedEnabled && !isAntiFocus(winFlags)) {
+                // 5. 聚焦窗口 && 开关开启 && 非防聚焦浮窗 → 渲染
                 hide = false;
             } else {
-                // 白名单：只有选中的包才渲染，未选中的跳过截图合成
-                hide = pkg != null && !systemRenderPackages.contains(pkg.toLowerCase(Locale.ROOT));
+                // 6. 其余(导航栏/状态栏等) → 隐藏
+                hide = true;
             }
         } catch (Throwable ignored) {
         }
@@ -741,10 +779,28 @@ public class MainXposedModule extends XposedModule {
         if (systemRenderEnabled) {
             log(Log.INFO, TAG, "[WIN] pkg=" + pkg + " type=" + winType
                     + " focused=" + focused
+                    + " fullscreen=" + fullscreen
                     + " isFocusedM=" + (windowStateIsFocusedMethod != null)
+                    + " isFullscreenM=" + (windowStateIsFullscreenMethod != null)
                     + " hide=" + hide);
         }
         return hide;
+    }
+
+    /** 判断窗口是否为全屏窗口。 */
+    private boolean isFullscreenWindow(Object winState) {
+        if (winState == null || windowStateIsFullscreenMethod == null) return false;
+        try {
+            return Boolean.TRUE.equals(windowStateIsFullscreenMethod.invoke(winState));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** 判断窗口是否带防聚焦(magic_flags)标志：NOT_FOCUSABLE|NOT_TOUCHABLE|NOT_TOUCH_MODAL。 */
+    private boolean isAntiFocus(int flags) {
+        int mask = FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCHABLE | FLAG_NOT_TOUCH_MODAL;
+        return (flags & mask) == mask;
     }
 
     /** 判断窗口是否为前台应用窗口（即系统当前聚焦窗口 mCurrentFocus）。 */
