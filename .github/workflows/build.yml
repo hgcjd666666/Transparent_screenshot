@@ -1,8 +1,11 @@
-name: Android Release Build
+name: Android Build & Release
 
 on:
   push:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -24,14 +27,48 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      # tag / Release 名称用 UTC+8 精确到秒的时间戳
+      - name: Compute build metadata
+        id: meta
+        run: |
+          TS=$(TZ=Asia/Shanghai date +%Y%m%d%H%M%S)
+          echo "TAG=${TS}" >> "$GITHUB_OUTPUT"
+          echo "VERSION_NAME=${TS}" >> "$GITHUB_OUTPUT"
+
       - name: Clean project
         run: ./gradlew clean
 
       - name: Build Release APK
         run: ./gradlew assembleRelease
+        env:
+          TSS_VERSION_NAME: ${{ steps.meta.outputs.VERSION_NAME }}
 
-      - name: Upload Release APK
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
+        env:
+          TSS_VERSION_NAME: ${{ steps.meta.outputs.VERSION_NAME }}
+
+      - name: Upload Release APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release
           path: app/build/outputs/apk/release/*.apk
+
+      - name: Upload Debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/*.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.TAG }}
+          name: ${{ steps.meta.outputs.VERSION_NAME }}
+          body: |
+            自动构建于 ${{ steps.meta.outputs.VERSION_NAME }}（UTC+8）
+            - versionCode = 提交次数
+            - versionName = 构建时间
+          files: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/debug/*.apk

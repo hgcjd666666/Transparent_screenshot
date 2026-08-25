@@ -2,6 +2,27 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+// ===== 版本号：versionCode=提交次数，versionName=构建时间(UTC+8 精确到秒) =====
+def gitCommitCount() {
+    try {
+        def p = "git rev-list --count HEAD".execute(null, rootProject.projectDir)
+        def count = p.text.trim()
+        p.waitFor()
+        return count.isInteger() ? count : "1"
+    } catch (Exception e) {
+        return "1"
+    }
+}
+
+def buildTime() {
+    def fmt = new java.text.SimpleDateFormat("yyyyMMddHHmmss", java.util.Locale.ROOT)
+    fmt.setTimeZone(java.util.TimeZone.getTimeZone("Asia/Shanghai"))
+    return fmt.format(new Date())
+}
+
+def versionCodeVal = (System.getenv("TSS_VERSION_CODE") ?: gitCommitCount()).toInteger()
+def versionNameVal = System.getenv("TSS_VERSION_NAME") ?: buildTime()
+
 android {
     namespace 'com.dszsu.tss'
     compileSdk {
@@ -12,10 +33,17 @@ android {
         applicationId "com.dszsu.tss"
         minSdk 29
         targetSdk 36
-        versionCode 211
-        versionName '2.1.1'
+        versionCode versionCodeVal
+        versionName versionNameVal
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // 输出 APK 带版本名，便于 Release 识别
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            output.outputFileName = "${rootProject.name}-${variant.name}-${versionNameVal}.apk"
+        }
     }
 
     buildTypes {
