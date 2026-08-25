@@ -26,7 +26,7 @@ def versionNameVal = System.getenv("TSS_VERSION_NAME") ?: buildTime()
 android {
     namespace 'com.dszsu.tss'
     compileSdk {
-        version = release(36)
+        version = release(37)
     }
 
     defaultConfig {
