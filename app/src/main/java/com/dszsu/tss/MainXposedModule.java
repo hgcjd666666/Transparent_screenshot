@@ -259,7 +259,9 @@ public class MainXposedModule extends XposedModule {
         // 重置静态安装标志与运行时缓存，允许按需重新安装
         resetForHotReload();
 
-        ClassLoader cl = currentClassLoader();
+        // 必须用 HotReloadedParam 提供的进程默认 classloader；
+        // 线程 context classloader 在热重载时不是 system_server/app 的 classloader，无法加载系统/oplus 类
+        ClassLoader cl = param.getDefaultClassLoader();
         if (param.isSystemServer()) {
             initSystemServerHooks(cl);
         } else if ("com.android.systemui".equals(param.getProcessName())) {
@@ -290,12 +292,6 @@ public class MainXposedModule extends XposedModule {
         synchronized (enabledFeatures) {
             enabledFeatures.clear();
         }
-    }
-
-    private ClassLoader currentClassLoader() {
-        ClassLoader cl = Thread.currentThread().getContextClassLoader();
-        if (cl == null) cl = ClassLoader.getSystemClassLoader();
-        return cl;
     }
 
     private String getProcessName() {
