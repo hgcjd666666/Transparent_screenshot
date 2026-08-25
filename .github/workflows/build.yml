@@ -48,17 +48,22 @@ jobs:
         env:
           TSS_VERSION_NAME: ${{ steps.meta.outputs.VERSION_NAME }}
 
-      - name: Upload Release APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release
-          path: app/build/outputs/apk/release/*.apk
+      - name: Rename & collect APKs
+        run: |
+          mkdir -p dist
+          for apk in app/build/outputs/apk/release/*.apk; do
+            cp "$apk" "dist/TransparentScreenshot-${{ steps.meta.outputs.VERSION_NAME }}-release.apk"
+          done
+          for apk in app/build/outputs/apk/debug/*.apk; do
+            cp "$apk" "dist/TransparentScreenshot-${{ steps.meta.outputs.VERSION_NAME }}-debug.apk"
+          done
+          ls -la dist
 
-      - name: Upload Debug APK artifact
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: apk
+          path: dist/*.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -69,6 +74,4 @@ jobs:
             自动构建于 ${{ steps.meta.outputs.VERSION_NAME }}（UTC+8）
             - versionCode = 提交次数
             - versionName = 构建时间
-          files: |
-            app/build/outputs/apk/release/*.apk
-            app/build/outputs/apk/debug/*.apk
+          files: dist/*.apk

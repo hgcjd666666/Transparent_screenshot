@@ -39,13 +39,6 @@ android {
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    // 输出 APK 带版本名，便于 Release 识别
-    applicationVariants.all { variant ->
-        variant.outputs.all { output ->
-            output.outputFileName = "${rootProject.name}-${variant.name}-${versionNameVal}.apk"
-        }
-    }
-
     buildTypes {
         release {
             minifyEnabled true
