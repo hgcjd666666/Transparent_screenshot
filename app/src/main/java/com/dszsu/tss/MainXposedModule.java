@@ -160,12 +160,16 @@ public class MainXposedModule extends XposedModule {
     public void onSystemServerStarting(
             @NonNull XposedModuleInterface.SystemServerStartingParam param) {
         super.onSystemServerStarting(param);
+        initSystemServerHooks(param.getClassLoader());
+    }
+
+    private void initSystemServerHooks(ClassLoader cl) {
         try {
             SharedPreferences sysPrefs = getRemotePreferences(SYSTEM_HIDE_GROUP);
             loadSystemRenderPackages(sysPrefs);
             systemUIEnhancementEnabled = sysPrefs.contains("system_ui_enhancement_enabled");
             sysPrefs.registerOnSharedPreferenceChangeListener(systemPrefsListener);
-            installSystemHooks(param.getClassLoader());
+            installSystemHooks(cl);
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "Failed to init system hooks: " + t);
         }
@@ -174,42 +178,49 @@ public class MainXposedModule extends XposedModule {
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
         if ("com.android.systemui".equals(param.getPackageName())) {
-            try {
-                SharedPreferences sysPrefs = getRemotePreferences(SYSTEM_HIDE_GROUP);
-                systemUIEnhancementEnabled = sysPrefs.contains("system_ui_enhancement_enabled");
-            } catch (Throwable t) {
-                systemUIEnhancementEnabled = false;
-            }
-            if (systemUIEnhancementEnabled && !sSystemUIHookInstalled) {
-                synchronized (systemUILock) {
-                    if (!sSystemUIHookInstalled) {
-                        try {
-                            initAppReflection(param.getClassLoader());
-                            installSystemUIHook(param);
-                            sSystemUIHookInstalled = true;
-                            log(Log.INFO, TAG, "SystemUI enhancement hook installed");
-                        } catch (Throwable t) {
-                            log(Log.ERROR, TAG, "SystemUI hook failed: " + t);
-                        }
+            initSystemUIHooks(param.getClassLoader());
+            return;
+        }
+        initAppHooks(param.getPackageName(), param.getClassLoader());
+    }
+
+    private void initSystemUIHooks(ClassLoader cl) {
+        try {
+            SharedPreferences sysPrefs = getRemotePreferences(SYSTEM_HIDE_GROUP);
+            systemUIEnhancementEnabled = sysPrefs.contains("system_ui_enhancement_enabled");
+        } catch (Throwable t) {
+            systemUIEnhancementEnabled = false;
+        }
+        if (systemUIEnhancementEnabled && !sSystemUIHookInstalled) {
+            synchronized (systemUILock) {
+                if (!sSystemUIHookInstalled) {
+                    try {
+                        initAppReflection(cl);
+                        installSystemUIHook(cl);
+                        sSystemUIHookInstalled = true;
+                        log(Log.INFO, TAG, "SystemUI enhancement hook installed");
+                    } catch (Throwable t) {
+                        log(Log.ERROR, TAG, "SystemUI hook failed: " + t);
                     }
                 }
             }
-            return;
         }
+    }
 
-        String configPackage = resolveConfigPackage(param.getPackageName());
+    private void initAppHooks(String packageName, ClassLoader cl) {
+        String configPackage = resolveConfigPackage(packageName);
         loadConfig(configPackage);
 
         if (!sAppHooksInstalled) {
             synchronized (appLock) {
                 if (!sAppHooksInstalled) {
                     try {
-                        initAppReflection(param.getClassLoader());
+                        initAppReflection(cl);
                         if (needsLayoutParamChanges()) {
-                            installWindowManagerHook(param);
+                            installWindowManagerHook(cl);
                         }
                         if (enabledFeatures.contains("enable_skip_screenshot")) {
-                            installAntiScreenshotHook(param);
+                            installAntiScreenshotHook(cl);
                         }
                         if (enabledFeatures.contains("hide_recent_card")) {
                             installHideRecentsHook();
@@ -221,6 +232,62 @@ public class MainXposedModule extends XposedModule {
                 }
             }
         }
+    }
+
+    // ==================== 热重载 ====================
+    @Override
+    public boolean onHotReloading(@NonNull XposedModuleInterface.HotReloadingParam param) {
+        log(Log.INFO, TAG, "onHotReloading: " + param.getProcessName());
+        return true; // 同意热重载
+    }
+
+    @Override
+    public void onHotReloaded(@NonNull XposedModuleInterface.HotReloadedParam param) {
+        log(Log.INFO, TAG, "onHotReloaded: " + param.getProcessName()
+                + ", " + param.getOldHookHandles().size() + " old hooks");
+        // 卸载旧代次安装的所有 hook
+        param.getOldHookHandles().forEach(XposedInterface.HookHandle::unhook);
+
+        // 重置静态安装标志与运行时缓存，允许按需重新安装
+        resetForHotReload();
+
+        ClassLoader cl = currentClassLoader();
+        if (param.isSystemServer()) {
+            initSystemServerHooks(cl);
+        } else if ("com.android.systemui".equals(param.getProcessName())) {
+            initSystemUIHooks(cl);
+        } else {
+            initAppHooks(param.getProcessName(), cl);
+        }
+        log(Log.INFO, TAG, "Hot reload done: " + param.getProcessName());
+    }
+
+    private void resetForHotReload() {
+        sSystemHooksInstalled = false;
+        sAppHooksInstalled = false;
+        sSystemUIHookInstalled = false;
+        sAppCacheReady = false;
+        sSurfaceControlField = null;
+        sScClass = null;
+        sScIsValid = null;
+        sTxnConstructor = null;
+        localCacheVersion = -1;
+        windowHideCache.clear();
+        systemSecureApplied.clear();
+        taskSecureApplied.clear();
+        processedWindows.clear();
+        secureApplied.clear();
+        flexibleTaskVri.clear();
+        appPrefsListeners.clear();
+        synchronized (enabledFeatures) {
+            enabledFeatures.clear();
+        }
+    }
+
+    private ClassLoader currentClassLoader() {
+        ClassLoader cl = Thread.currentThread().getContextClassLoader();
+        if (cl == null) cl = ClassLoader.getSystemClassLoader();
+        return cl;
     }
 
     private String getProcessName() {
@@ -633,10 +700,10 @@ public class MainXposedModule extends XposedModule {
         if (cached != null) return cached;
 
         boolean hide = false;
+        String pkg = null;
+        int winType = -1;
+        boolean focused = false;
         try {
-            String pkg = null;
-            int winType = -1;
-
             if (windowStateAttrsField != null) {
                 try {
                     Object attrs = windowStateAttrsField.get(winState);
@@ -656,10 +723,11 @@ public class MainXposedModule extends XposedModule {
                 pkg = (String) getOwningPackageMethod.invoke(winState);
             }
 
+            focused = isForegroundApp(winState);
             // 输入法窗口始终保留渲染，不受白名单影响
             if (winType == WindowManager.LayoutParams.TYPE_INPUT_METHOD) {
                 hide = false;
-            } else if (isForegroundApp(winState)) {
+            } else if (focused) {
                 // 前台应用窗口（当前聚焦窗口）不隐藏，仅隐藏其余窗口
                 hide = false;
             } else {
@@ -670,6 +738,12 @@ public class MainXposedModule extends XposedModule {
         }
 
         windowHideCache.put(winState, hide);
+        if (systemRenderEnabled) {
+            log(Log.INFO, TAG, "[WIN] pkg=" + pkg + " type=" + winType
+                    + " focused=" + focused
+                    + " isFocusedM=" + (windowStateIsFocusedMethod != null)
+                    + " hide=" + hide);
+        }
         return hide;
     }
 
@@ -742,9 +816,9 @@ public class MainXposedModule extends XposedModule {
     }
 
     @SuppressLint("PrivateApi")
-    private void installWindowManagerHook(PackageReadyParam param) throws Exception {
+    private void installWindowManagerHook(ClassLoader cl) throws Exception {
         Class<?> wmg = Class.forName(
-                "android.view.WindowManagerGlobal", false, param.getClassLoader());
+                "android.view.WindowManagerGlobal", false, cl);
         for (Method method : wmg.getDeclaredMethods()) {
             String name = method.getName();
             if (!"addView".equals(name) && !"updateViewLayout".equals(name)) continue;
@@ -787,9 +861,9 @@ public class MainXposedModule extends XposedModule {
     }
 
     @SuppressLint("PrivateApi")
-    private void installAntiScreenshotHook(PackageReadyParam param) throws Exception {
+    private void installAntiScreenshotHook(ClassLoader cl) throws Exception {
         Class<?> vriClass = Class.forName(
-                "android.view.ViewRootImpl", false, param.getClassLoader());
+                "android.view.ViewRootImpl", false, cl);
         for (Method m : vriClass.getDeclaredMethods()) {
             final String name = m.getName();
             if (!"setView".equals(name) && !"relayoutWindow".equals(name)) continue;
@@ -875,10 +949,10 @@ public class MainXposedModule extends XposedModule {
     }
 
     @SuppressLint("PrivateApi")
-    private void installSystemUIHook(PackageReadyParam param) throws Exception {
+    private void installSystemUIHook(ClassLoader cl) throws Exception {
         Class<?> menuManagerClass = Class.forName(
                 "com.oplus.flexibletask.menu.FlexibleMenuManager",
-                false, param.getClassLoader());
+                false, cl);
 
         Method getWindowParams = menuManagerClass.getDeclaredMethod("getWindowParams");
         getWindowParams.setAccessible(true);
@@ -906,7 +980,7 @@ public class MainXposedModule extends XposedModule {
                     }
                 });
 
-        Class<?> vriClass = param.getClassLoader().loadClass("android.view.ViewRootImpl");
+        Class<?> vriClass = cl.loadClass("android.view.ViewRootImpl");
         for (Method m : vriClass.getDeclaredMethods()) {
             final String name = m.getName();
             if (!"setView".equals(name) && !"relayoutWindow".equals(name)) continue;
