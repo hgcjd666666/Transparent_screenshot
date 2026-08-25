@@ -47,9 +47,9 @@ public class MainXposedModule extends XposedModule {
     private static volatile Method sScIsValid;
     private static volatile Constructor<?> sTxnConstructor;
 
-    private volatile boolean systemHideEnabled = false;
+    private volatile boolean systemRenderEnabled = false;
     private static volatile boolean sSystemUIHookInstalled = false;
-    private volatile Set<String> systemHiddenPackages = Collections.emptySet();
+    private volatile Set<String> systemRenderPackages = Collections.emptySet();
     private static volatile String sProcessName;
     private final Object systemUILock = new Object();
     private final Set<String> enabledFeatures = new HashSet<>();
@@ -75,7 +75,7 @@ public class MainXposedModule extends XposedModule {
     private final SharedPreferences.OnSharedPreferenceChangeListener systemPrefsListener =
             (prefs, key) -> {
                 if ("packages".equals(key)) {
-                    loadSystemHiddenPackages(prefs);
+                    loadSystemRenderPackages(prefs);
                     //noinspection NonAtomicOperationOnVolatileField
                     cacheVersion++;
                     log(Log.INFO, TAG, "System hide packages updated");
@@ -99,6 +99,10 @@ public class MainXposedModule extends XposedModule {
     private Method getOwningPackageMethod;
     @Nullable
     private Field layoutParamsPackageNameField;
+    @Nullable
+    private Field layoutParamsTypeField;
+    @Nullable
+    private Method windowStateIsFocusedMethod;
     @Nullable
     private Method getTaskMethod;
     @Nullable
@@ -158,7 +162,7 @@ public class MainXposedModule extends XposedModule {
         super.onSystemServerStarting(param);
         try {
             SharedPreferences sysPrefs = getRemotePreferences(SYSTEM_HIDE_GROUP);
-            loadSystemHiddenPackages(sysPrefs);
+            loadSystemRenderPackages(sysPrefs);
             systemUIEnhancementEnabled = sysPrefs.contains("system_ui_enhancement_enabled");
             sysPrefs.registerOnSharedPreferenceChangeListener(systemPrefsListener);
             installSystemHooks(param.getClassLoader());
@@ -349,6 +353,13 @@ public class MainXposedModule extends XposedModule {
             getOwningPackageMethod = null;
         }
 
+        try {
+            windowStateIsFocusedMethod = findMethodInHierarchy(windowStateClass, "isFocused");
+            windowStateIsFocusedMethod.setAccessible(true);
+        } catch (Throwable ignored) {
+            windowStateIsFocusedMethod = null;
+        }
+
 
         animatorWinField = findFieldInHierarchy(windowStateAnimatorClass, "mWin");
         animatorWinField.setAccessible(true);
@@ -387,10 +398,12 @@ public class MainXposedModule extends XposedModule {
             windowStateAttrsField = findFieldInHierarchy(windowStateClass, "mAttrs");
             windowStateAttrsField.setAccessible(true);
             layoutParamsPackageNameField = WindowManager.LayoutParams.class.getField("packageName");
+            layoutParamsTypeField = WindowManager.LayoutParams.class.getField("type");
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Direct field access for package name unavailable: " + t.getMessage());
             windowStateAttrsField = null;
             layoutParamsPackageNameField = null;
+            layoutParamsTypeField = null;
         }
 
         systemTxnConstructor = transactionClass.getDeclaredConstructor();
@@ -503,10 +516,10 @@ public class MainXposedModule extends XposedModule {
         }
     }
 
-    private void loadSystemHiddenPackages(SharedPreferences prefs) {
+    private void loadSystemRenderPackages(SharedPreferences prefs) {
         if (!prefs.contains("packages")) {
-            systemHideEnabled = false;
-            systemHiddenPackages = Collections.emptySet();
+            systemRenderEnabled = false;
+            systemRenderPackages = Collections.emptySet();
             return;
         }
         Set<String> raw = prefs.getStringSet("packages", Collections.emptySet());
@@ -514,12 +527,12 @@ public class MainXposedModule extends XposedModule {
         for (String p : raw) {
             if (p != null && !p.isEmpty()) lower.add(p.toLowerCase(Locale.ROOT));
         }
-        systemHiddenPackages = Collections.unmodifiableSet(lower);
-        systemHideEnabled = true;
+        systemRenderPackages = Collections.unmodifiableSet(lower);
+        systemRenderEnabled = true;
     }
 
     private void applySkipScreenshotIfNeeded(Object animator) {
-        if (!systemHideEnabled || animator == null) return;
+        if (!systemRenderEnabled || animator == null) return;
         try {
             Object winState = animatorWinField.get(animator);
             if (winState == null || !processedWindows.add(winState)) return;
@@ -606,7 +619,7 @@ public class MainXposedModule extends XposedModule {
     }
 
     private boolean shouldHideWindow(Object winState) {
-        if (!systemHideEnabled || winState == null) return false;
+        if (!systemRenderEnabled || winState == null) return false;
 
         if (localCacheVersion != cacheVersion) {
             windowHideCache.clear();
@@ -622,12 +635,18 @@ public class MainXposedModule extends XposedModule {
         boolean hide = false;
         try {
             String pkg = null;
+            int winType = -1;
 
-            if (windowStateAttrsField != null && layoutParamsPackageNameField != null) {
+            if (windowStateAttrsField != null) {
                 try {
                     Object attrs = windowStateAttrsField.get(winState);
                     if (attrs != null) {
-                        pkg = (String) layoutParamsPackageNameField.get(attrs);
+                        if (layoutParamsPackageNameField != null) {
+                            pkg = (String) layoutParamsPackageNameField.get(attrs);
+                        }
+                        if (layoutParamsTypeField != null) {
+                            winType = layoutParamsTypeField.getInt(attrs);
+                        }
                     }
                 } catch (Throwable ignored) {
                 }
@@ -637,14 +656,31 @@ public class MainXposedModule extends XposedModule {
                 pkg = (String) getOwningPackageMethod.invoke(winState);
             }
 
-            if (pkg != null && systemHiddenPackages.contains(pkg.toLowerCase(Locale.ROOT))) {
-                hide = true;
+            // 输入法窗口始终保留渲染，不受白名单影响
+            if (winType == WindowManager.LayoutParams.TYPE_INPUT_METHOD) {
+                hide = false;
+            } else if (isForegroundApp(winState)) {
+                // 前台应用窗口（当前聚焦窗口）不隐藏，仅隐藏其余窗口
+                hide = false;
+            } else {
+                // 白名单：只有选中的包才渲染，未选中的跳过截图合成
+                hide = pkg != null && !systemRenderPackages.contains(pkg.toLowerCase(Locale.ROOT));
             }
         } catch (Throwable ignored) {
         }
 
         windowHideCache.put(winState, hide);
         return hide;
+    }
+
+    /** 判断窗口是否为前台应用窗口（即系统当前聚焦窗口 mCurrentFocus）。 */
+    private boolean isForegroundApp(Object winState) {
+        if (winState == null || windowStateIsFocusedMethod == null) return false;
+        try {
+            return Boolean.TRUE.equals(windowStateIsFocusedMethod.invoke(winState));
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     @SuppressLint("PrivateApi")

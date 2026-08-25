@@ -39,7 +39,7 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
     private static final Set<String> EXCLUDE_PACKAGES = Set.of(
             "system", "android", "com.android.systemui", "oplus");
 
-    private final Set<String> hiddenPackages = new HashSet<>();
+    private final Set<String> renderPackages = new HashSet<>();
     private final List<AppInfo> allFilteredApps = new ArrayList<>();
 
     private ActivitySystemHideBinding binding;
@@ -131,7 +131,7 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
     public void onServiceChanged(XposedService svc) {
         service = svc;
         if (svc != null) {
-            loadHiddenPackages();
+            loadRenderPackages();
             rebuildAppList();
         }
     }
@@ -153,14 +153,14 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
         return query == null ? "" : query.toLowerCase(Locale.ROOT).trim();
     }
 
-    private void loadHiddenPackages() {
+    private void loadRenderPackages() {
         if (service == null) return;
         SharedPreferences prefs = service.getRemotePreferences("system_hide");
-        hiddenPackages.clear();
+        renderPackages.clear();
         Set<String> raw = prefs.getStringSet("packages", new HashSet<>());
         for (String p : raw) {
             if (p != null && !p.isEmpty()) {
-                hiddenPackages.add(normalizePackageName(p));
+                renderPackages.add(normalizePackageName(p));
             }
         }
     }
@@ -171,7 +171,7 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
 
         for (AppInfo app : allApps) {
             String lowerPkg = normalizePackageName(app.getPackageName());
-            boolean enabled = hiddenPackages.contains(lowerPkg);
+            boolean enabled = renderPackages.contains(lowerPkg);
 
             if (!enabled) {
                 if (EXCLUDE_PACKAGES.contains(lowerPkg) || isSubPackageOfExcluded(lowerPkg))
@@ -211,7 +211,7 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
                     && !normalizePackageName(app.getPackageName()).contains(lowerQuery)) {
                 continue;
             }
-            if (hiddenPackages.contains(normalizePackageName(app.getPackageName()))) {
+            if (renderPackages.contains(normalizePackageName(app.getPackageName()))) {
                 enabled.add(app);
             } else {
                 disabled.add(app);
@@ -224,19 +224,19 @@ public class SystemHideActivity extends AppCompatActivity implements App.Service
         List<AppInfo> finalList = new ArrayList<>(enabled.size() + disabled.size());
         finalList.addAll(enabled);
         finalList.addAll(disabled);
-        adapter.submitList(finalList, hiddenPackages);
+        adapter.submitList(finalList, renderPackages);
     }
 
     private void onToggle(String packageName, boolean enabled) {
         if (service == null) return;
         String lowerPkg = normalizePackageName(packageName);
         if (enabled) {
-            hiddenPackages.add(lowerPkg);
+            renderPackages.add(lowerPkg);
         } else {
-            hiddenPackages.remove(lowerPkg);
+            renderPackages.remove(lowerPkg);
         }
         service.getRemotePreferences("system_hide").edit()
-                .putStringSet("packages", new HashSet<>(hiddenPackages))
+                .putStringSet("packages", new HashSet<>(renderPackages))
                 .apply();
         applyFilter(currentQuery);
     }
