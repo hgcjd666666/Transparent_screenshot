@@ -772,7 +772,7 @@ public class MainXposedModule extends XposedModule {
 
         windowHideCache.put(winState, hide);
         if (systemRenderEnabled) {
-            log(Log.INFO, TAG, "[WIN] pkg=" + pkg + " type=" + winType
+            debugLog(Log.INFO, TAG, "[WIN] pkg=" + pkg + " type=" + winType
                     + " focused=" + focused
                     + " fullscreen=" + fullscreen
                     + " isFocusedM=" + (windowStateIsFocusedMethod != null)
@@ -780,6 +780,11 @@ public class MainXposedModule extends XposedModule {
                     + " hide=" + hide);
         }
         return hide;
+    }
+
+    /** 仅 debug 构建输出日志，release 构建静默以减少日志量。 */
+    private void debugLog(int level, String tag, String msg) {
+        if (BuildConfig.DEBUG) log(level, tag, msg);
     }
 
     /** 判断窗口是否为全屏窗口。 */
@@ -821,7 +826,7 @@ public class MainXposedModule extends XposedModule {
                     Field f = vriClass.getDeclaredField(name);
                     f.setAccessible(true);
                     sSurfaceControlField = f;
-                    log(Log.DEBUG, TAG, "VRI SC field: " + name);
+                    debugLog(Log.DEBUG, TAG, "VRI SC field: " + name);
                     break;
                 } catch (NoSuchFieldException ignored) {
                 }
