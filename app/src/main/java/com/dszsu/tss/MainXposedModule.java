@@ -237,7 +237,7 @@ public class MainXposedModule extends XposedModule {
     // ==================== 热重载 ====================
     @Override
     public boolean onHotReloading(@NonNull XposedModuleInterface.HotReloadingParam param) {
-        log(Log.INFO, TAG, "onHotReloading: " + param.getProcessName());
+        log(Log.INFO, TAG, "onHotReloading: " + getProcessName());
         return true; // 同意热重载
     }
 
